@@ -2,7 +2,7 @@
 @Title: Patriarch Farmer
 @Description: Find Living rock Patriarch, kill, area-loot all, and world hop.
 @Author: Codex
-@Version: 1.0.0
+@Version: 1.0.1
 --]]
 
 local API = require("api")
@@ -48,8 +48,6 @@ local GUI = {
         enableSoulSplit = false,
         enableProtectFromMelee = false,
         randomizeWorldOrder = false,
-        worldHopDelayMin = 1000,
-        worldHopDelayMax = 3000,
         enableFood = false,
         foodName = "blubber jellyfish",
         foodHealThreshold = 4000,
@@ -93,10 +91,6 @@ local CFG = {
     PRE_LOOT_DELAY_MAX_MS = 950,
     POST_LOOT_DELAY_MIN_MS = 700,
     POST_LOOT_DELAY_MAX_MS = 1200,
-    PRE_HOP_DELAY_MIN_MS = 900,
-    PRE_HOP_DELAY_MAX_MS = 1700,
-    POST_HOP_DELAY_MIN_MS = 1800,
-    POST_HOP_DELAY_MAX_MS = 3000,
     MICRO_PAUSE_CHANCE = 0.03,
     MICRO_PAUSE_MIN_MS = 900,
     MICRO_PAUSE_MAX_MS = 2200,
@@ -516,7 +510,7 @@ local function performWorldHop()
         return false
     end
 
-    randomSleep((CFG.PRE_HOP_DELAY_MIN_MS + CFG.PRE_HOP_DELAY_MAX_MS) / 2)
+    randomSleep(1300)
 
     if not openWorldSelection() then
         log("Could not open world selection")
@@ -538,7 +532,7 @@ local function performWorldHop()
         return API.GetGameState2() == 3
     end)
 
-    randomSleep((CFG.POST_HOP_DELAY_MIN_MS + CFG.POST_HOP_DELAY_MAX_MS) / 2)
+    randomSleep(2400)
 
     local newWorld = API.GetWorldNR() or oldWorld
     rt.currentWorld = newWorld
@@ -616,36 +610,6 @@ local function drawConfigTab()
     if randChanged then GUI.config.randomizeWorldOrder = randVal end
     if ImGui.IsItemHovered() then
         ImGui.SetTooltip("Hop to worlds in random order instead of sequential.")
-    end
-
-    ImGui.Spacing()
-    flavorText("Set delays between world hops in milliseconds.")
-    ImGui.Spacing()
-
-    ImGui.Text("Minimum Delay (ms):")
-    local minChanged, newMin = ImGui.SliderInt("##hopMinDelay", GUI.config.worldHopDelayMin, 100, 10000)
-    if minChanged then
-        GUI.config.worldHopDelayMin = newMin
-        if GUI.config.worldHopDelayMin > GUI.config.worldHopDelayMax then
-            GUI.config.worldHopDelayMax = GUI.config.worldHopDelayMin
-        end
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip("Minimum delay before hopping to the next world.")
-    end
-
-    ImGui.Spacing()
-
-    ImGui.Text("Maximum Delay (ms):")
-    local maxChanged, newMax = ImGui.SliderInt("##hopMaxDelay", GUI.config.worldHopDelayMax, 100, 10000)
-    if maxChanged then
-        GUI.config.worldHopDelayMax = newMax
-        if GUI.config.worldHopDelayMax < GUI.config.worldHopDelayMin then
-            GUI.config.worldHopDelayMin = GUI.config.worldHopDelayMax
-        end
-    end
-    if ImGui.IsItemHovered() then
-        ImGui.SetTooltip("Maximum delay before hopping to the next world.")
     end
 
     ImGui.Spacing()
@@ -733,12 +697,6 @@ local function drawInfoTab()
         ImGui.TextWrapped("Protect from Melee")
         ImGui.TableNextColumn()
         ImGui.TextWrapped(GUI.config.enableProtectFromMelee and "Enabled" or "Disabled")
-
-        ImGui.TableNextRow()
-        ImGui.TableNextColumn()
-        ImGui.TextWrapped("World Hop Delay")
-        ImGui.TableNextColumn()
-        ImGui.TextWrapped(GUI.config.worldHopDelayMin .. " - " .. GUI.config.worldHopDelayMax .. " ms")
 
         ImGui.EndTable()
     end
@@ -834,10 +792,9 @@ while API.Read_LoopyLoop() do
             log("Patriarch found! Traveling to target...")
             setState(STATE.MOVE_TO_TARGET)
         else
-            log("Patriarch not found. Hopping in " .. (GUI.config.worldHopDelayMin / 1000) .. "-" .. (GUI.config.worldHopDelayMax / 1000) .. " seconds...")
+            log("Patriarch not found, hopping...")
             rt.emptyWorlds = rt.emptyWorlds + 1
             clearTarget()
-            randomSleep((GUI.config.worldHopDelayMin + GUI.config.worldHopDelayMax) / 2)
             setState(STATE.WORLD_HOP)
         end
 
@@ -899,18 +856,22 @@ while API.Read_LoopyLoop() do
 
     elseif rt.state == STATE.LOOT_ALL then
         if stateElapsed() > CFG.LOOT_TIMEOUT_SEC then
+            log("Loot timeout, hopping")
             setState(STATE.WORLD_HOP)
         else
             rt.lootAttempts = rt.lootAttempts + 1
             randomSleep((CFG.PRE_LOOT_DELAY_MIN_MS + CFG.PRE_LOOT_DELAY_MAX_MS) / 2)
             local opened = Slib:AreaLootOpen()
             if opened then
-                API.KeyboardPress2(0x20, 60, 60)
+                randomSleep((CFG.POST_LOOT_DELAY_MIN_MS + CFG.POST_LOOT_DELAY_MAX_MS) / 2)
+                Slib:AreaLootTakeItems("all")
+                randomSleep((CFG.POST_LOOT_DELAY_MIN_MS + CFG.POST_LOOT_DELAY_MAX_MS) / 2)
+                log("Loot taken")
+                setState(STATE.WORLD_HOP)
+            else
+                log("Area loot window not open, retrying...")
+                randomSleep(500)
             end
-            randomSleep((CFG.POST_LOOT_DELAY_MIN_MS + CFG.POST_LOOT_DELAY_MAX_MS) / 2)
-            log("Loot attempted (spacebar)")
-            randomSleep(3000)
-            setState(STATE.WORLD_HOP)
         end
 
     elseif rt.state == STATE.WORLD_HOP then
@@ -922,7 +883,7 @@ while API.Read_LoopyLoop() do
             local okHop = performWorldHop()
             if not okHop then
                 -- Wait before retrying on next loop tick
-                randomSleep((CFG.PRE_HOP_DELAY_MIN_MS + CFG.PRE_HOP_DELAY_MAX_MS) / 2)
+                randomSleep(1300)
             else
                 clearTarget()
                 setState(STATE.SCAN_PATRIARCH)
