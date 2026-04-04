@@ -2,6 +2,18 @@
 
 Automatically finds, kills, and loots Living Rock Patriarchs with world hopping.
 
+### Library Requirements
+- slib
+
+### In-Game Requirements
+
+- Magic Golem outfit set
+- Necromancy weapons T70+
+- Phantom on your action bar
+- Revolution on
+- Auto Retaliate on
+- Remove AOE abilities from your action bar (to avoid aggro on other NPCs)
+
 ## Features
 
 - Scans for Living Rock Patriarch and moves to attack
@@ -14,15 +26,14 @@ Automatically finds, kills, and loots Living Rock Patriarchs with world hopping.
 - Cycles through all P2P worlds with cycle tracking
 - ImGui config GUI with live status display
 
-## Setup Instructions
+## Setup
 
-1. Have **Phantom** on your action bar
-2. Turn **Revolution** on
-3. Turn **Auto Retaliate** on
-4. **Remove AOE abilities** from your action bar (to avoid aggro on other NPCs)
-5. Have full magic golem set equipped. (script won't work without it, will be perma ragged)
-6. Stand near the Living Rock Cavern spawn area
-7. Start the script, configure options in the GUI, and click Start
+1. Equip Magic Golem outfit and Necromancy weapons
+2. Put **Phantom** on your action bar
+3. Enable **Revolution** and **Auto Retaliate**
+4. **Remove AOE abilities** from your action bar
+5. Stand near the Living Rock Cavern spawn area
+6. Start the script, configure options in the GUI, and click Start
 
 ## GUI Options
 
