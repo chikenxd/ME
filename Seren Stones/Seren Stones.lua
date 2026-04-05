@@ -7,7 +7,6 @@
 --]]
 
 local API = require("api")
-local UTILS = require("utils")
 local SHOP = require("shop")
 local SerenGUI = require("SerenStones.SerenStonesGUI")
 
@@ -19,7 +18,7 @@ local CLEANSING_CRYSTAL_ID = 32615
 local HEFIN_MONK_IDS = { 20270, 20271 }
 local CORRUPTED_SEREN_STONE_ID = 94048
 local SEREN_CLEANSE_ANIM = 24556
-local XP_FAILSAFE_SECONDS = 120
+local XP_FAILSAFE_SECONDS = 300
 local XP_SKILL = "PRAYER"
 
 local runtime = {
@@ -59,6 +58,13 @@ local function stopScript(reason)
     end
     runtime.running = false
     API.Write_LoopyLoop(false)
+end
+
+local function gameStateChecks()
+    if API.GetGameState2 and API.GetGameState2() ~= 3 then
+        return false
+    end
+    return API.Read_LoopyLoop() == true
 end
 
 local function updateXpTracker()
@@ -617,7 +623,7 @@ while API.Read_LoopyLoop() do
             API.RandomSleep2(160, 40, 20)
         end
     else
-        if not UTILS:gameStateChecks() then
+        if not gameStateChecks() then
             stopScript("Game state check failed")
             break
         end
