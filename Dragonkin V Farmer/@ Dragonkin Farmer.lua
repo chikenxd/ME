@@ -1,17 +1,20 @@
 --[[
-    Dragonkin V Farmer
+    Dragonkin Farmer
     Modernized Dragonkin archaeology token farmer with a tabbed ImGui shell,
-    API-randomized waits, runtime state visibility, and optional artifact redemption.
+    humanized waits, runtime state visibility, and optional artifact redemption.
 --]]
 
 local API = require("api")
 local WH = require("WH")
+local humanDelay = require("humanDelay")
+local EmbeddedConfigPanel = require("core.EmbeddedConfigPanel")
 
 API.SetDrawLogs(true)
 API.SetDrawTrackedSkills(true)
+HUMAN_DELAY_MODE = "afk"
 math.randomseed(os.time())
 
-local SCRIPT_NAME = "Dragonkin V Farmer"
+local SCRIPT_NAME = "Dragonkin Farmer"
 local NO_XP_FAILSAFE_SECONDS = 300
 
 local IDS = {
@@ -62,6 +65,13 @@ local SPOT_LABELS = {
     [130307] = "Castle hall rubble",
     [130309] = "Tunnelling equipment repository",
 }
+local DAEMONHEIM_RETURN_TILE = { x = 3450, y = 3703, z = 0 }
+local DRAGONKIN_RESUME_TILE = { x = 3449, y = 3725, z = 0 }
+local DRAGONKIN_RESUME_RADIUS = 3
+local FARM_RETURN_BANK_TIMEOUT_SECONDS = 8.0
+local FARM_RETURN_TRAVEL_TIMEOUT_SECONDS = 30.0
+local FARM_RETURN_PRESET_NUMBER = 5 -- preset 5
+
 local STATE = {
     IDLE = "IDLE",
     EXCAVATING = "EXCAVATING",
@@ -79,6 +89,9 @@ local STATE = {
 local CONFIG = {
     startSpotIndex = 1,
     redeemArtifacts = true,
+    enableFarmRuns = false,
+    startWithFarmRun = false,
+    farmRunIntervalMinutes = 80,
     enableTimedWorldHop = false,
     worldHopPreset = "all_p2p",
     worldHopMinMinutes = 18,
@@ -125,15 +138,26 @@ local RUNTIME = {
     hopPending = false,
     hopPendingReason = "",
     hopFailCount = 0,
+    farmRunNextAt = 0,
+    farmRunPending = false,
+    farmRunInProgress = false,
+    startFarmRunPending = false,
+    nextFarmLabel = "Not scheduled",
+    farmRunCount = 0,
+    farmRunFailureCount = 0,
+    lastFarmResult = "-",
+    resumeAfterFarmPending = false,
+    herbFarm = nil,
     lastPorterTopUpAt = 0,
     lastObservedArchXp = 0,
     lastXpGainAt = 0,
     lastActionKey = "",
     sameActionCount = 0,
     lastProgressAt = 0,
-    presetResetInitialized = false,
+    farmOnlyInitialized = false,
     nextSpriteDecisionAt = 0,
     lastExcavationScanLogAt = 0,
+    postFarmResumeDebugPending = false,
     goteChargeFailCount = 0,
     lastGoteChargeAt = 0,
     inventoryArrayNullRecoveries = 0,
@@ -192,9 +216,9 @@ local function resolveConfigPath()
     source = source:gsub("^@", "")
     local dir = source:match("^(.*)[/\\][^/\\]+$")
     if not dir then
-        return "dragonkin-v-farmer-default.config.json"
+        return "dragonkin-farmer-default.config.json"
     end
-    return dir .. "\\configs\\dragonkin-v-farmer-" .. getCharacterName() .. ".config.json"
+    return dir .. "\\configs\\dragonkin-farmer-" .. getCharacterName() .. ".config.json"
 end
 
 local CONFIG_PATH = resolveConfigPath()
@@ -204,6 +228,32 @@ local function getScriptDirectory()
     source = source:gsub("^@", "")
     return source:match("^(.*)[/\\][^/\\]+$") or "."
 end
+
+local function loadEmbeddedHerbRunsEngine()
+    local addonPath = getScriptDirectory() .. "\\Herb Runs\\HerbRunsAddon.lua"
+    local enginePath = getScriptDirectory() .. "\\Herb Runs\\HerbRuns Legacy.lua"
+
+    local ok, addonModule = pcall(dofile, addonPath)
+    if not ok or type(addonModule) ~= "table" or type(addonModule.new) ~= "function" then
+        print(string.format("[%s] Embedded Herb Runs load failed: %s", SCRIPT_NAME, tostring(addonModule)))
+        return nil
+    end
+
+    local okNew, engine = pcall(addonModule.new, {
+        enginePath = enginePath,
+        hostName = "DragonkinFarmer",
+        logPrefix = "[Dragonkin][HerbRuns]",
+    })
+    if not okNew or type(engine) ~= "table" then
+        print(string.format("[%s] Embedded Herb Runs init failed: %s", SCRIPT_NAME, tostring(engine)))
+        return nil
+    end
+
+    return engine
+end
+
+local HerbRunsEngine = loadEmbeddedHerbRunsEngine()
+RUNTIME.herbFarm = HerbRunsEngine
 
 local function normalizeWorldHopPreset(key)
     if type(WH.getWorldSelectionIndex) == "function" and type(WH.getWorldSelectionKeyByIndex) == "function" then
@@ -289,6 +339,7 @@ end
 
 local function sanitizeConfig()
     CONFIG.startSpotIndex = clampInteger(CONFIG.startSpotIndex, 1, #START_SPOT_OPTIONS, 1)
+    CONFIG.farmRunIntervalMinutes = clampInteger(CONFIG.farmRunIntervalMinutes, 20, 240, 80)
     CONFIG.worldHopPreset = normalizeWorldHopPreset(CONFIG.worldHopPreset)
     CONFIG.worldHopMinMinutes = clampInteger(CONFIG.worldHopMinMinutes, 1, 180, 18)
     CONFIG.worldHopMaxMinutes = clampInteger(CONFIG.worldHopMaxMinutes, CONFIG.worldHopMinMinutes, 240, 32)
@@ -319,6 +370,9 @@ local function loadConfigFromFile()
 
     CONFIG.startSpotIndex = data.StartSpotIndex or CONFIG.startSpotIndex
     CONFIG.redeemArtifacts = data.RedeemArtifacts ~= false
+    CONFIG.enableFarmRuns = data.EnableFarmRuns == true
+    CONFIG.startWithFarmRun = data.StartWithFarmRun == true
+    CONFIG.farmRunIntervalMinutes = data.FarmRunIntervalMinutes or CONFIG.farmRunIntervalMinutes
     CONFIG.enableTimedWorldHop = data.EnableTimedWorldHop == true
     CONFIG.worldHopPreset = data.WorldHopPreset or CONFIG.worldHopPreset
     CONFIG.worldHopMinMinutes = data.WorldHopMinMinutes or CONFIG.worldHopMinMinutes
@@ -343,6 +397,9 @@ local function saveConfigToFile()
     local payload = {
         StartSpotIndex = CONFIG.startSpotIndex,
         RedeemArtifacts = CONFIG.redeemArtifacts,
+        EnableFarmRuns = CONFIG.enableFarmRuns,
+        StartWithFarmRun = CONFIG.startWithFarmRun,
+        FarmRunIntervalMinutes = CONFIG.farmRunIntervalMinutes,
         EnableTimedWorldHop = CONFIG.enableTimedWorldHop,
         WorldHopPreset = CONFIG.worldHopPreset,
         WorldHopMinMinutes = CONFIG.worldHopMinMinutes,
@@ -486,9 +543,12 @@ local function checkNoXpFailsafe()
 end
 
 local function delay(center, spread, label)
-    local wait = tonumber(center) or 0
-    local variance = tonumber(spread) or 0
-    API.RandomSleep2(wait, variance, variance)
+    local ok = pcall(function()
+        humanDelay(center, spread, label or 0, 1)
+    end)
+    if not ok then
+        API.RandomSleep2(center, spread or 0, spread or 0)
+    end
 end
 
 local function loopDelay()
@@ -577,6 +637,46 @@ local function nextWorldHopLabel()
     local minutes = math.floor(remaining / 60)
     local seconds = remaining % 60
     return string.format("%02d:%02d", minutes, seconds)
+end
+
+local function scheduleNextFarmRun()
+    if CONFIG.enableFarmRuns ~= true then
+        RUNTIME.farmRunNextAt = 0
+        RUNTIME.farmRunPending = false
+        RUNTIME.nextFarmLabel = "Off"
+        return
+    end
+
+    local minutes = math.max(20, math.min(240, tonumber(CONFIG.farmRunIntervalMinutes) or 80))
+    RUNTIME.farmRunNextAt = os.time() + (minutes * 60)
+    RUNTIME.farmRunPending = false
+    RUNTIME.nextFarmLabel = string.format("%dm", minutes)
+end
+
+local function nextFarmRunLabel()
+    if CONFIG.enableFarmRuns ~= true then
+        return "Off"
+    end
+    if RUNTIME.farmRunInProgress then
+        return "Running"
+    end
+    if RUNTIME.farmRunPending then
+        return "Ready"
+    end
+    if RUNTIME.farmRunNextAt <= 0 then
+        return tostring(RUNTIME.nextFarmLabel or "Not scheduled")
+    end
+
+    local remaining = math.max(0, RUNTIME.farmRunNextAt - os.time())
+    local minutes = math.floor(remaining / 60)
+    local seconds = remaining % 60
+    return string.format("%02d:%02d", minutes, seconds)
+end
+
+local function shouldFarmRunNow()
+    return CONFIG.enableFarmRuns == true
+        and RUNTIME.farmRunNextAt > 0
+        and os.time() >= RUNTIME.farmRunNextAt
 end
 
 local function getPlayerCoord()
@@ -932,6 +1032,12 @@ local function worldHopBlockReason()
         or RUNTIME.state == STATE.TRAVEL_DAEMONHEIM
     then
         return "state " .. tostring(RUNTIME.state)
+    end
+    if RUNTIME.farmRunInProgress == true then
+        return "farm run in progress"
+    end
+    if RUNTIME.resumeAfterFarmPending == true then
+        return "farm resume pending"
     end
     return nil
 end
@@ -1322,6 +1428,301 @@ local function topUpPortersAfterPreset()
     updatePorterStatus()
 end
 
+local function openWarsRetreatBank()
+    setState(STATE.BANKING, "Opening War's Retreat bank")
+    setAction("Opening War's Retreat bank")
+    if Bank:IsOpen() then
+        return true
+    end
+
+    local deadline = os.time() + math.max(1, math.ceil(FARM_RETURN_BANK_TIMEOUT_SECONDS))
+    local attempts = 0
+
+    while API.Read_LoopyLoop() and os.time() < deadline do
+        if Bank:IsOpen() then
+            return true
+        end
+
+        attempts = attempts + 1
+        local action = (attempts % 2 == 1) and "Use" or "Bank"
+        if Interact and Interact.Object then
+            pcall(function()
+                Interact:Object("Bank chest", action)
+            end)
+        end
+        if API.WaitUntilMovingEnds then
+            pcall(API.WaitUntilMovingEnds, 600, 5)
+        end
+        if waitUntil(function()
+            return Bank:IsOpen() == true
+        end, 1.2, 120) then
+            return true
+        end
+    end
+
+    return Bank:IsOpen() == true
+end
+
+local function teleportToWarsRetreat()
+    setState(STATE.TRAVEL_ANACHRONIA, "Teleporting to War's Retreat")
+    setAction("Teleporting to War's Retreat")
+
+    local teleported = false
+    teleported = useActionBarAbility("War's Retreat Teleport", 1)
+    if not teleported then
+        logError("Could not teleport to War's Retreat")
+        return false
+    end
+
+    delay(2600, 450, 0)
+    if API.WaitUntilMovingEnds then
+        pcall(API.WaitUntilMovingEnds, 600, 5)
+    end
+    return true
+end
+
+local function loadDragonkinResumePreset()
+    setAction(string.format("Loading Dragonkin preset %d", FARM_RETURN_PRESET_NUMBER))
+    if not openWarsRetreatBank() then
+        logError("Could not open War's Retreat bank")
+        return false
+    end
+
+    local inventorySignatureBefore = getInventorySignature()
+
+    if not (Bank and type(Bank.LoadPreset) == "function" and Bank:LoadPreset(FARM_RETURN_PRESET_NUMBER) == true) then
+        logError(string.format("Could not load preset %d", FARM_RETURN_PRESET_NUMBER))
+        return false
+    end
+
+    local presetApplied = waitUntil(function()
+        if getInventorySignature() ~= inventorySignatureBefore then
+            return true
+        end
+        return safeInvItemCount(15707, "Daemonheim teleport confirmation") > 0
+    end, 4.0, 120)
+    if not presetApplied then
+        logError(string.format("Preset %d did not visibly apply", FARM_RETURN_PRESET_NUMBER))
+        return false
+    end
+
+    waitAfterPresetReload()
+    delay(500, 160, 0)
+    markProgress("Preset loaded")
+    return true
+end
+
+local function chargeAllPortersAfterPreset()
+    setAction("Charge all porters")
+    if not needsPorterRecharge() then
+        updatePorterStatus()
+        markProgress("Porters already charged")
+        return true
+    end
+
+    local beforeFound, beforeAmount = getPorterBuffState()
+    local ok, used = pcall(function()
+        return useGraceOfTheElvesAbility()
+    end)
+    if not ok or used ~= true then
+        logError("Could not charge all porters after preset")
+        return false
+    end
+
+    if not confirmPorterCharge(beforeFound, beforeAmount) then
+        logError("Charge all porters did not confirm")
+        return false
+    end
+
+    topUpPortersAfterPreset()
+    markProgress("Porters charged")
+    return true
+end
+
+local function teleportToDragonkinFromPreset()
+    setState(STATE.TRAVEL_DAEMONHEIM, "Teleporting to Daemonheim")
+    setAction("Teleporting to Daemonheim")
+
+    local teleported = false
+    if API.DoAction_Interface then
+        local ok, used = pcall(function()
+            return API.DoAction_Interface(0x24, 0x3d5b, 3, 1473, 5, 1, API.OFF_ACT_GeneralInterface_route)
+        end)
+        teleported = ok and used == true
+    end
+    if not teleported and API.DoAction_Inventory1 then
+        local ok, used = pcall(function()
+            return API.DoAction_Inventory1(15707, 0, 3, API.OFF_ACT_GeneralInterface_route)
+        end)
+        teleported = ok and used == true
+    end
+    if not teleported then
+        logError("Could not teleport to Daemonheim from preset")
+        return false
+    end
+
+    delay(2200, 500, 0)
+    if API.WaitUntilMovingEnds then
+        pcall(API.WaitUntilMovingEnds, 600, 5)
+    end
+    local arrived = waitUntil(function()
+        return isNearTile({ x = DAEMONHEIM_RETURN_TILE.x, y = DAEMONHEIM_RETURN_TILE.y }, DRAGONKIN_RESUME_RADIUS)
+            or isAtFremennikBanker()
+    end, FARM_RETURN_TRAVEL_TIMEOUT_SECONDS, 180)
+    if arrived then
+        markProgress("Arrived at Daemonheim")
+    end
+    return arrived
+end
+
+local function moveToDragonkinResumeTile()
+    setAction("Returning to Dragonkin dig start")
+    local targetX = DRAGONKIN_RESUME_TILE.x + math.random(-2, 2)
+    local targetY = DRAGONKIN_RESUME_TILE.y + math.random(-2, 2)
+    local targetZ = DRAGONKIN_RESUME_TILE.z
+    local destination = WPOINT.new(targetX, targetY, targetZ)
+
+    local beforeX, beforeY, beforeZ = getPlayerCoord()
+    local moveSent = API.DoAction_Tile(destination) == true
+    log("Post-farm resume debug: stage=move_sent sent=" .. tostring(moveSent)
+        .. " from=" .. tostring(beforeX) .. "," .. tostring(beforeY) .. "," .. tostring(beforeZ or 0)
+        .. " target=" .. tostring(targetX) .. "," .. tostring(targetY) .. "," .. tostring(targetZ))
+    if API.WaitUntilMovingEnds then
+        pcall(API.WaitUntilMovingEnds, 600, 5)
+    end
+
+    local arrived = waitUntil(function()
+        return isNearTile({ x = targetX, y = targetY, z = targetZ }, 1)
+    end, 12, 180)
+    local afterX, afterY, afterZ = getPlayerCoord()
+    log("Post-farm resume debug: stage=move_settled arrived=" .. tostring(arrived)
+        .. " current=" .. tostring(afterX) .. "," .. tostring(afterY) .. "," .. tostring(afterZ or 0)
+        .. " moving=" .. tostring(isMoving())
+        .. " anim=" .. tostring(getCurrentAnimation())
+        .. " processing=" .. tostring(API.isProcessing()))
+    if arrived then
+        markProgress("Moved to Dragonkin resume tile")
+    end
+    return arrived
+end
+
+local function returnToDragonkinAfterFarm()
+    RUNTIME.resumeAfterFarmPending = true
+
+    if not teleportToWarsRetreat() then
+        return false, "Could not teleport to War's Retreat"
+    end
+    if not loadDragonkinResumePreset() then
+        return false, string.format("Could not load preset %d", FARM_RETURN_PRESET_NUMBER)
+    end
+    if not chargeAllPortersAfterPreset() then
+        return false, "Could not charge all porters"
+    end
+    if not teleportToDragonkinFromPreset() then
+        return false, "Did not arrive near 3450, 3703"
+    end
+    if not moveToDragonkinResumeTile() then
+        return false, "Could not move near 3449, 3725"
+    end
+
+    RUNTIME.clickedSpotTile = nil
+    RUNTIME.spotIndex = CONFIG.startSpotIndex
+    RUNTIME.nextSpriteDecisionAt = 0
+    RUNTIME.farmOnlyInitialized = true
+    RUNTIME.resumeAfterFarmPending = false
+    RUNTIME.postFarmResumeDebugPending = true
+    local px, py, pz = getPlayerCoord()
+    log("Post-farm resume debug: stage=return_complete"
+        .. " current=" .. tostring(px) .. "," .. tostring(py) .. "," .. tostring(pz or 0)
+        .. " bankerCount=" .. tostring(#API.GetAllObjArray1({ IDS.banker }, 50, { 1 }))
+        .. " debrisCount=" .. tostring(#copyObjectArray(API.GetAllObjArrayInteract({ SPOT_IDS[1], SPOT_IDS[2] }, 50, { 0, 1, 12 })))
+        .. " spotIndex=" .. tostring(RUNTIME.spotIndex))
+    return true
+end
+
+local function isSafeToStartFarmRun()
+    if not RUNTIME.started then
+        return false
+    end
+    if RUNTIME.farmRunInProgress or RUNTIME.resumeAfterFarmPending then
+        return false
+    end
+    if RUNTIME.state == STATE.WORLD_HOPPING then
+        return false
+    end
+    if isMoving() or API.isProcessing() then
+        return false
+    end
+    if Bank:IsOpen() or lodestoneInterfaceOpen() or workInterfaceOpen() or sharriganInterfaceOpen() then
+        return false
+    end
+    return true
+end
+
+local function runScheduledFarmRun(forceStart)
+    local forced = forceStart == true
+
+    if RUNTIME.farmRunInProgress then
+        setState(RUNTIME.state, "Farm run already in progress")
+        return true
+    end
+
+    if not forced and (CONFIG.enableFarmRuns ~= true or RUNTIME.farmRunPending ~= true) then
+        return false
+    end
+
+    local herbFarm = RUNTIME.herbFarm
+    if type(herbFarm) ~= "table" or type(herbFarm.runRouteOnce) ~= "function" then
+        RUNTIME.lastFarmResult = "Failed: Herb Runs unavailable"
+        RUNTIME.nextFarmLabel = "Herb Runs unavailable"
+        return false
+    end
+
+    RUNTIME.farmRunPending = false
+    RUNTIME.startFarmRunPending = false
+    RUNTIME.farmRunInProgress = true
+    RUNTIME.resumeAfterFarmPending = false
+    setState(STATE.IDLE, forced and "Running initial farm route" or "Running scheduled farm route")
+    setAction("Running herb run")
+    RUNTIME.nextFarmLabel = RUNTIME.status
+
+    local okCall, farmSucceeded, farmResult = pcall(function()
+        return herbFarm:runRouteOnce()
+    end)
+    if not okCall then
+        farmResult = tostring(farmSucceeded)
+        farmSucceeded = false
+    end
+
+    if farmSucceeded == true then
+        RUNTIME.farmRunCount = (RUNTIME.farmRunCount or 0) + 1
+        RUNTIME.lastFarmResult = tostring(farmResult or "Herb route complete")
+    else
+        RUNTIME.farmRunFailureCount = (RUNTIME.farmRunFailureCount or 0) + 1
+        RUNTIME.lastFarmResult = "Failed: " .. tostring(farmResult or "Herb route failed")
+    end
+
+    local returnOk, returnReason = returnToDragonkinAfterFarm()
+    RUNTIME.farmRunInProgress = false
+
+    if not returnOk then
+        RUNTIME.lastFarmResult = tostring(RUNTIME.lastFarmResult or "Farm route failed")
+            .. " | Return failed: " .. tostring(returnReason or "unknown")
+        stopRun("Farm return failed: " .. tostring(returnReason or "unknown"))
+        return true
+    end
+
+    setState(STATE.TRAVEL_DAEMONHEIM, farmSucceeded == true and "Farm run complete" or "Farm run failed")
+    setAction("Resuming Dragonkin")
+    RUNTIME.lastXpGainAt = os.time()
+    RUNTIME.lastObservedArchXp = getArchaeologyXp()
+    log("Resuming Dragonkin excavation after farm return")
+    markProgress("Resumed after farm run")
+    scheduleNextFarmRun()
+    delay(300, 100, 0)
+    return true
+end
+
 local function shouldFollowSpriteNow()
     local now = os.time()
     if now < (RUNTIME.nextSpriteDecisionAt or 0) then
@@ -1548,7 +1949,7 @@ local function loadLastPresetFromFremennikBanker()
     return true
 end
 
-local function runPresetReset()
+local function runFarmOnlyPresetReset()
     if not goToDaemonheim() then
         return false
     end
@@ -1610,9 +2011,32 @@ local function excavate()
         RUNTIME.clickedSpotTile = nil
     end
 
+    if RUNTIME.postFarmResumeDebugPending then
+        local px, py, pz = getPlayerCoord()
+        log("Post-farm resume debug: stage=first_excavation_tick"
+            .. " current=" .. tostring(px) .. "," .. tostring(py) .. "," .. tostring(pz or 0)
+            .. " state=" .. tostring(RUNTIME.state)
+            .. " action=" .. tostring(RUNTIME.currentAction)
+            .. " moving=" .. tostring(isMoving())
+            .. " anim=" .. tostring(getCurrentAnimation())
+            .. " processing=" .. tostring(API.isProcessing())
+            .. " clickedTile=" .. formatTile(RUNTIME.clickedSpotTile)
+            .. " spotIndex=" .. tostring(RUNTIME.spotIndex))
+    end
+
     local spots = getExcavationSpots()
     local spriteSpot = getSpriteSpot(spots, 50)
     local canStartExcavation = not isMoving() and not isExcavationLoopAnimation()
+
+    if RUNTIME.postFarmResumeDebugPending then
+        log("Post-farm resume debug: stage=first_excavation_spots"
+            .. " spots=" .. tostring(#spots)
+            .. " spriteSpot=" .. tostring(spriteSpot ~= nil)
+            .. " canStart=" .. tostring(canStartExcavation)
+            .. " bankerCount=" .. tostring(#API.GetAllObjArray1({ IDS.banker }, 50, { 1 }))
+            .. " debrisCount=" .. tostring(#copyObjectArray(API.GetAllObjArrayInteract({ SPOT_IDS[1], SPOT_IDS[2] }, 50, { 0, 1, 12 }))))
+        RUNTIME.postFarmResumeDebugPending = false
+    end
 
     if spriteSpot then
         if not RUNTIME.clickedSpotTile or not tilesMatch(RUNTIME.clickedSpotTile, spriteSpot.Tile_XYZ) then
@@ -2053,6 +2477,9 @@ stopRun = function(reason)
     RUNTIME.started = false
     RUNTIME.stopReason = tostring(reason or "")
     RUNTIME.clickedSpotTile = nil
+    RUNTIME.farmRunInProgress = false
+    RUNTIME.resumeAfterFarmPending = false
+    RUNTIME.postFarmResumeDebugPending = false
     RUNTIME.repairActive = false
     RUNTIME.repairOnlyMode = false
     RUNTIME.redeemOnlyMode = false
@@ -2084,17 +2511,29 @@ local function resetForStart()
     RUNTIME.hopPending = false
     RUNTIME.hopPendingReason = ""
     RUNTIME.hopFailCount = 0
+    RUNTIME.farmRunNextAt = 0
+    RUNTIME.farmRunPending = CONFIG.enableFarmRuns == true and CONFIG.startWithFarmRun == true
+    RUNTIME.farmRunInProgress = false
+    RUNTIME.startFarmRunPending = CONFIG.enableFarmRuns == true and CONFIG.startWithFarmRun == true
+    RUNTIME.nextFarmLabel = "Not scheduled"
+    RUNTIME.farmRunCount = 0
+    RUNTIME.farmRunFailureCount = 0
+    RUNTIME.lastFarmResult = "-"
+    RUNTIME.resumeAfterFarmPending = false
+    RUNTIME.herbFarm = HerbRunsEngine
     RUNTIME.lastPorterTopUpAt = 0
     RUNTIME.lastObservedArchXp = getArchaeologyXp()
     RUNTIME.lastXpGainAt = os.time()
     RUNTIME.lastActionKey = ""
     RUNTIME.sameActionCount = 0
     RUNTIME.lastProgressAt = os.time()
-    RUNTIME.presetResetInitialized = false
+    RUNTIME.farmOnlyInitialized = false
     RUNTIME.lastExcavationScanLogAt = 0
+    RUNTIME.postFarmResumeDebugPending = false
     RUNTIME.goteChargeFailCount = 0
     RUNTIME.lastGoteChargeAt = 0
     scheduleNextWorldHop()
+    scheduleNextFarmRun()
     setState(STATE.TRAVEL_DAEMONHEIM, "Starting run")
 end
 
@@ -2114,6 +2553,10 @@ local function startRepairMode()
     RUNTIME.stopReason = ""
     RUNTIME.lastError = ""
     RUNTIME.hopPending = false
+    RUNTIME.farmRunPending = false
+    RUNTIME.startFarmRunPending = false
+    RUNTIME.farmRunInProgress = false
+    RUNTIME.resumeAfterFarmPending = false
     RUNTIME.repairStatus = "Starting repair queue"
     setState(STATE.REPAIRING, "Starting repair queue")
     setAction("Repair queue")
@@ -2131,6 +2574,10 @@ local function startRedeemMode()
     RUNTIME.stopReason = ""
     RUNTIME.lastError = ""
     RUNTIME.hopPending = false
+    RUNTIME.farmRunPending = false
+    RUNTIME.startFarmRunPending = false
+    RUNTIME.farmRunInProgress = false
+    RUNTIME.resumeAfterFarmPending = false
     setState(STATE.TURNING_IN_ARTIFACTS, "Starting standalone redemption")
     setAction("Redeeming artifacts")
     Gui.saveConfig()
@@ -2162,6 +2609,9 @@ local function statTable()
         { "Next Hop", nextWorldHopLabel() },
         { "World Pool", WH.getWorldSelectionLabel(CONFIG.worldHopPreset) },
         { "Last Hop", tostring(RUNTIME.lastWorldHopDiagnostic ~= "" and RUNTIME.lastWorldHopDiagnostic or "-") },
+        { "Next Farm", nextFarmRunLabel() },
+        { "Farm Runs", tostring(RUNTIME.farmRunCount) },
+        { "Farm Result", tostring(RUNTIME.lastFarmResult) },
         { "Hop Reason", tostring(RUNTIME.lastWorldHopReason) },
         { "Collections/hr", string.format("%.2f", getCollectionsPerHour()) },
         { "Ring", tostring(RUNTIME.collections.ring + guiInvItemCount(IDS.ring)) },
@@ -2198,6 +2648,23 @@ local function drawConfigTab()
         Gui.saveConfig()
     end
 
+    ImGui.PushID("dragonkin_redeem")
+    local changedRedeem, newRedeem = ImGui.Checkbox("Redeem Artifacts", CONFIG.redeemArtifacts)
+    ImGui.PopID()
+    if changedRedeem then
+        CONFIG.redeemArtifacts = newRedeem
+        Gui.saveConfig()
+    end
+
+    ImGui.PushID("dragonkin_farm_runs")
+    local changedFarmRuns, newFarmRuns = ImGui.Checkbox("Enable Farm Runs", CONFIG.enableFarmRuns)
+    ImGui.PopID()
+    if changedFarmRuns then
+        CONFIG.enableFarmRuns = newFarmRuns
+        scheduleNextFarmRun()
+        Gui.saveConfig()
+    end
+
     ImGui.PushID("dragonkin_debug")
     local changedDebug, newDebug = ImGui.Checkbox("Enable Debug Logs", CONFIG.debugLogs)
     ImGui.PopID()
@@ -2229,6 +2696,83 @@ local function drawConfigTab()
         ImGui.PopID()
         ImGui.PopStyleColor(3)
     end
+end
+
+local function drawFarmRunTab()
+    sectionHeader("Farm Run")
+    flavorText("Host Herb Runs Legacy on a timer, then resume Dragonkin through preset 5 and the Daemonheim handoff.")
+    ImGui.Spacing()
+    ImGui.PushItemWidth(240)
+
+    if not RUNTIME.herbFarm then
+        ImGui.PushStyleColor(ImGuiCol.Text, 1.0, 0.55, 0.35, 1.0)
+        ImGui.TextWrapped("Herb Runs unavailable. Dragonkin farm scheduling will stay disabled until the embedded engine loads.")
+        ImGui.PopStyleColor(1)
+        ImGui.PopItemWidth()
+        return
+    end
+
+    ImGui.PushID("dragonkin_farm_enable")
+    local changedEnable, newEnable = ImGui.Checkbox("Enable Scheduled Farm Runs", CONFIG.enableFarmRuns)
+    ImGui.PopID()
+    if changedEnable then
+        CONFIG.enableFarmRuns = newEnable
+        scheduleNextFarmRun()
+        Gui.saveConfig()
+    end
+
+    ImGui.PushID("dragonkin_farm_start")
+    local changedStart, newStart = ImGui.Checkbox("Start With Farm Run", CONFIG.startWithFarmRun)
+    ImGui.PopID()
+    if changedStart then
+        CONFIG.startWithFarmRun = newStart
+        Gui.saveConfig()
+    end
+
+    ImGui.PushID("dragonkin_farm_interval")
+    local changedInterval, newInterval = ImGui.SliderInt("Farm Interval (Minutes)", CONFIG.farmRunIntervalMinutes, 20, 240)
+    ImGui.PopID()
+    if changedInterval then
+        CONFIG.farmRunIntervalMinutes = newInterval
+        sanitizeConfig()
+        scheduleNextFarmRun()
+        Gui.saveConfig()
+    end
+
+    ImGui.Spacing()
+    ImGui.TextWrapped("Next farm run: " .. nextFarmRunLabel())
+    ImGui.TextWrapped("Last farm result: " .. tostring(RUNTIME.lastFarmResult))
+    ImGui.TextWrapped("Farm runs completed: " .. tostring(RUNTIME.farmRunCount))
+    ImGui.TextWrapped("Farm run failures: " .. tostring(RUNTIME.farmRunFailureCount))
+
+    local herbFarm = RUNTIME.herbFarm
+    if type(herbFarm) ~= "table" or type(herbFarm.getPanelSchema) ~= "function" then
+        ImGui.Spacing()
+        flavorText("Herb Runs engine unavailable in this session.")
+        ImGui.PopItemWidth()
+        return
+    end
+
+    ImGui.Spacing()
+    ImGui.Separator()
+    ImGui.Spacing()
+
+    EmbeddedConfigPanel.draw({
+        renderSectionHeader = sectionHeader,
+        renderHintText = flavorText,
+        saveHooks = {
+            embedded = function()
+                if type(herbFarm.commitPanelChanges) == "function" then
+                    herbFarm:commitPanelChanges()
+                end
+            end,
+        },
+        sections = herbFarm:getPanelSchema({
+            idPrefix = "dragonkin_farm",
+        }),
+    })
+
+    ImGui.PopItemWidth()
 end
 
 local function drawRuntimeTab()
@@ -2460,23 +3004,16 @@ local function drawWorldHopTab()
 end
 
 local function drawInfoTab()
-    sectionHeader("Dragonkin V Farmer")
-    ImGui.Spacing()
-
     sectionHeader("Requirements")
-    ImGui.BulletText("Grace of the elves action-bar ability is required for porter recharge support.")
-    ImGui.BulletText("Ring of kinship action-bar ability is required for Daemonheim travel.")
-    ImGui.BulletText("Keep porters available in your bank and in your preset, leave at least one free inventory slot.")
-    ImGui.BulletText("Unlock the Anachronia bank chest before using artifact redemption.")
-    ImGui.BulletText("Set your last bank preset for the Dragonkin excavation inventory.")
+    ImGui.BulletText("Requires Grace of the Elves equipped and on action bar.")
+    ImGui.BulletText("If redeeming artifacts, Ring of kinship must be equipped and on action bar.")
+    ImGui.BulletText("Keep porters available in your bank and leave at least one free inventory slot.")
+    ImGui.BulletText("If redeeming artifacts, unlock the Anachronia bank chest first.")
+    ImGui.BulletText("Farm-only mode reloads your last preset from the Fremennik banker on start and full inventories.")
+    ImGui.BulletText("Farm-run resume uses preset 5, charge-all porters, then teleports back near 3450, 3703.")
     ImGui.Spacing()
-
     sectionHeader("Flow")
-    ImGui.BulletText("Start Script excavates the selected Dragonkin debris spot.")
-    ImGui.BulletText("Full inventories reload your last preset from the Fremennik banker.")
-    ImGui.BulletText("Standalone Redeem handles restored artifact turn-ins from the Redeem tab.")
-    ImGui.BulletText("Repair Queue runs selected artifact repairs from the Repair tab.")
-    ImGui.Spacing()
+    ImGui.TextWrapped("Daemonheim excavation -> banker reset -> optional Anachronia restore and turn-in cycle -> return to Daemonheim.")
 end
 
 DrawImGui(function()
@@ -2509,7 +3046,7 @@ DrawImGui(function()
     ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding,  4)
     ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 6)
 
-    local visible = ImGui.Begin("Dragonkin V Farmer###DragonkinVFarmerGUI", true)
+    local visible = ImGui.Begin("Dragonkin Farmer###DragonkinFarmerGUI", true)
     if visible then
         if ImGui.BeginTabBar("##dragonkin_tabs", 0) then
             if ImGui.BeginTabItem("Config##dragonkin_tab_config", nil, 0) then
@@ -2518,6 +3055,10 @@ DrawImGui(function()
             end
             if ImGui.BeginTabItem("Runtime##dragonkin_tab_runtime", nil, 0) then
                 drawRuntimeTab()
+                ImGui.EndTabItem()
+            end
+            if ImGui.BeginTabItem("Farm Run##dragonkin_tab_farm", nil, 0) then
+                drawFarmRunTab()
                 ImGui.EndTabItem()
             end
             if ImGui.BeginTabItem("Redeem##dragonkin_tab_redeem", nil, 0) then
@@ -2709,6 +3250,14 @@ local function tick()
     if checkNoXpFailsafe() then
         return
     end
+    if CONFIG.enableFarmRuns == true and shouldFarmRunNow() then
+        RUNTIME.farmRunPending = true
+    end
+    if (RUNTIME.startFarmRunPending == true or RUNTIME.farmRunPending == true) and isSafeToStartFarmRun() then
+        if runScheduledFarmRun(RUNTIME.startFarmRunPending == true) then
+            return
+        end
+    end
     if handleWorldHopRequests() then
         return
     end
@@ -2725,12 +3274,12 @@ local function tick()
         end
     end
 
-    if not CONFIG.redeemArtifacts and not RUNTIME.presetResetInitialized and RUNTIME.iteration == 1 and not isAnimating() and not isMoving() then
-        if not runPresetReset() then
-            stopRun("Preset load failed")
+    if not CONFIG.redeemArtifacts and not RUNTIME.farmOnlyInitialized and RUNTIME.iteration == 1 and not isAnimating() and not isMoving() then
+        if not runFarmOnlyPresetReset() then
+            stopRun("Farm-only preset load failed")
             return
         end
-        RUNTIME.presetResetInitialized = true
+        RUNTIME.farmOnlyInitialized = true
         return
     end
 
@@ -2746,14 +3295,14 @@ local function tick()
                 stopRun("Redemption cycle failed")
                 return
             end
-                    if not runPresetReset() then
+                    if not runFarmOnlyPresetReset() then
                         stopRun("Preset reset failed after redemption")
                         return
                     end
         else
             trackBankedArtifacts()
-            if not runPresetReset() then
-                stopRun("Preset reset failed")
+            if not runFarmOnlyPresetReset() then
+                stopRun("Farm-only preset reset failed")
                 return
             end
         end
