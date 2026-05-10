@@ -1,11 +1,10 @@
 # HOM
 
-Hall of Memories Divination script for collecting jars, harvesting memories, and depositing full jars.
+Hall of Memories Divination script.
 
 ## Requirements
 
 - Start inside Hall of Memories.
-- Have access to memory jars and the memory bud deposit point.
 
 ## Features
 
@@ -14,7 +13,6 @@ Hall of Memories Divination script for collecting jars, harvesting memories, and
 - Optional 2-tick mode.
 - Optional world hopping.
 - Handles periodic random events such as Seren spirits.
-- Avoids repeat-clicking while already harvesting.
 
 ## Setup
 
@@ -51,7 +49,3 @@ Hall of Memories Divination script for collecting jars, harvesting memories, and
 When 2-tick mode is off, the script does not re-click memories after XP drops. It only sends the initial click needed to begin harvesting.
 
 When 2-tick mode is on, XP-drop re-clicking is enabled, but it is still gated by movement, animation, stationary time, action cooldown, and harvest animation checks.
-
-## Notes
-
-- `Author = "matthew"`.
