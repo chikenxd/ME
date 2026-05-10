@@ -5,7 +5,6 @@ Automatically farms Dragonkin archaeology debris with API-randomized delays, opt
 ## Library Requirements
 
 - api
-- Native WorldHop API
 
 ## In-Game Requirements
 
