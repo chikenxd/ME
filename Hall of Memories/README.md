@@ -1,4 +1,4 @@
-# Hall Of Memories
+# Hall of Memories
 
 Hall of Memories Divination script.
 
