@@ -584,7 +584,6 @@ end
 
 local function drawMainTab()
     sectionHeader("Hall of Memories")
-    flavorText("Pink/purple runtime panel with optional 2-tick XP-drop re-clicking.")
     ImGui.Spacing()
 
     local changed, selected = ImGui.Combo("Memory##hall_memory_type", CONFIG.selectedMemoryIndex, CONFIG.memoryOptions, #CONFIG.memoryOptions)
