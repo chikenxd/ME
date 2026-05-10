@@ -16,7 +16,7 @@ Hall of Memories Divination script.
 
 ## Setup
 
-1. Place `@ HallOfM.lua` in your Lua scripts folder.
+1. Place `HallOfM.lua` in your Lua scripts folder.
 2. Stand in Hall of Memories.
 3. Start the script.
 4. Choose the memory type in the Main tab.
