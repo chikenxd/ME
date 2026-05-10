@@ -370,7 +370,7 @@ end
 
 local function waitForJarGrabToSettle()
     if API.WaitUntilMovingEnds then
-        API.WaitUntilMovingEnds()
+        API.WaitUntilMovingEnds(10, 20)
     end
 
     local started = waitForResponse(1600, function()
@@ -383,6 +383,14 @@ local function waitForJarGrabToSettle()
     waitForResponse(6500, function()
         return not isGrabbingJars()
     end)
+end
+
+local function waitForDepositToSettle()
+    if API.WaitUntilMovingandAnimEnds then
+        API.WaitUntilMovingandAnimEnds(12, 10)
+    elseif API.WaitUntilMovingEnds then
+        API.WaitUntilMovingEnds(12, 10)
+    end
 end
 
 local function updateMemoryFinishTracker()
@@ -890,9 +898,9 @@ local function grabJars()
     API.DoAction_WalkerW(randomTileAround(2227, 9116, 1))
     RUNTIME.lastActionMs = nowMs()
     if API.WaitUntilMovingandAnimEnds then
-        API.WaitUntilMovingandAnimEnds(8, 8)
+        API.WaitUntilMovingandAnimEnds(10, 20)
     else
-        API.WaitUntilMovingEnds()
+        API.WaitUntilMovingEnds(10, 20)
     end
     delay(CONFIG.jarTravelDelayCenterMs, CONFIG.jarTravelDelaySpreadMs)
 
@@ -920,31 +928,45 @@ local function depositJars()
         return false
     end
 
-    setStatus("Moving to memory bud", "Deposit jars")
-    API.DoAction_Tile(randomTileAround(2207, 9120, 6))
-    RUNTIME.lastActionMs = nowMs()
-    if API.WaitUntilMovingandAnimEnds then
-        API.WaitUntilMovingandAnimEnds(8, 8)
-    else
-        API.WaitUntilMovingEnds()
+    updateJarCounts()
+    if RUNTIME.fullJars == 0 then
+        return true
     end
-    delay(CONFIG.jarTravelDelayCenterMs, CONFIG.jarTravelDelaySpreadMs)
 
-    local beforeFull = RUNTIME.fullJars
     setStatus("Depositing full jars", "Deposit jars")
     API.DoAction_Object1(0x29, API.OFF_ACT_GeneralObject_route0, { ID.DEPOSIT_OBJECT }, 74)
     RUNTIME.lastActionMs = nowMs()
 
-    local confirmed = waitForInventoryChange(5000, beforeFull, function()
-        updateJarCounts()
-        return RUNTIME.fullJars
+    -- Wait for the click to register (movement or animation start)
+    local reacted = waitForResponse(4000, function()
+        return playerIsMoving() or getPlayerAnim() ~= 0
     end)
-    if confirmed then
+
+    if not reacted then
+        setStatus("Deposit click had no response", "Waiting")
+        return false
+    end
+
+    -- Wait for movement and animation to fully complete
+    if API.WaitUntilMovingandAnimEnds then
+        API.WaitUntilMovingandAnimEnds(16, 8)
+    elseif API.WaitUntilMovingEnds then
+        API.WaitUntilMovingEnds(16, 8)
+    end
+
+    -- Wait for the slow deposit animation to fully finish
+    waitForResponse(12000, function()
+        return getPlayerAnim() == 0
+    end)
+
+    -- Don't re-click, don't walk. Let the main loop call us again if jars remain.
+    updateJarCounts()
+    if RUNTIME.fullJars == 0 then
         setStatus("Full jars deposited", "Deposit jars")
     else
-        setStatus("Deposit click sent with no jar change", "Waiting")
+        setStatus("Deposit in progress (" .. tostring(RUNTIME.fullJars) .. " jars left)", "Deposit jars")
     end
-    return confirmed
+    return true
 end
 
 local function handleRandomEvents()
@@ -973,11 +995,11 @@ local function runHallTick()
 
     handleXpDropReclick()
 
-    if isInventoryFull() then
+    if RUNTIME.fullJars >= 2 then
+        depositJars()
+    elseif isInventoryFull() then
         if RUNTIME.emptyJars > 0 or RUNTIME.partialJars > 0 then
             fillJars()
-        elseif RUNTIME.fullJars >= 2 then
-            depositJars()
         else
             setStatus("Inventory full with no actionable jar state", "Waiting")
         end
