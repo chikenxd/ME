@@ -4,8 +4,10 @@ local SCRIPT_NAME = "Vampenance"
 local MAGIC_SKILL = "MAGIC"
 
 local SPELLS = {
-    vampyrism = { name = "Vampyrism", vk = 0x31 },
-    penance = { name = "Penance", vk = 0x32 },
+    { name = "Vampyrism", vk = 0x31 },
+    { name = "Penance", vk = 0x32 },
+    { name = "Vampyrism", vk = 0x33 },
+    { name = "Penance", vk = 0x34 },
 }
 
 local STOP_MODES = { "Level", "Total XP" }
@@ -24,7 +26,7 @@ local RUNTIME = {
     startedAt = 0,
     vampyrismCasts = 0,
     penanceCasts = 0,
-    pairs = 0,
+    sequences = 0,
     lastCast = "None",
 }
 
@@ -91,28 +93,26 @@ local function startRun()
     RUNTIME.startedAt = API.ScriptRuntime()
     RUNTIME.vampyrismCasts = 0
     RUNTIME.penanceCasts = 0
-    RUNTIME.pairs = 0
+    RUNTIME.sequences = 0
     RUNTIME.lastCast = "None"
     return true
 end
 
-local function castPair()
-    local sentVampyrism = API.KeyboardPress2(SPELLS.vampyrism.vk, 20, 20)
-    if sentVampyrism == false then
-        return false, "API rejected the Vampyrism keypress."
+local function castSequence()
+    for _, spell in ipairs(SPELLS) do
+        local sent = API.KeyboardPress2(spell.vk, 20, 20)
+        if sent == false then
+            return false, "API rejected the " .. spell.name .. " keypress."
+        end
+        if spell.name == "Vampyrism" then
+            RUNTIME.vampyrismCasts = RUNTIME.vampyrismCasts + 1
+        else
+            RUNTIME.penanceCasts = RUNTIME.penanceCasts + 1
+        end
+        RUNTIME.lastCast = spell.name
+        API.RandomSleep2(35, 10, 10)
     end
-    RUNTIME.vampyrismCasts = RUNTIME.vampyrismCasts + 1
-    RUNTIME.lastCast = SPELLS.vampyrism.name
-    API.RandomSleep2(55, 20, 20)
-
-    local sentPenance = API.KeyboardPress2(SPELLS.penance.vk, 20, 20)
-    if sentPenance == false then
-        return false, "API rejected the Penance keypress."
-    end
-    RUNTIME.penanceCasts = RUNTIME.penanceCasts + 1
-    RUNTIME.lastCast = SPELLS.penance.name
-    RUNTIME.pairs = RUNTIME.pairs + 1
-    API.RandomSleep2(55, 20, 20)
+    RUNTIME.sequences = RUNTIME.sequences + 1
     return true, nil
 end
 
@@ -123,7 +123,7 @@ local function runCastingStep()
         return
     end
 
-    local ok, castReason = castPair()
+    local ok, castReason = castSequence()
     if not ok then
         stopRun(castReason, true)
     end
@@ -181,7 +181,7 @@ local function drawGui()
         ImGui.TextColored(THEME.gold[1], THEME.gold[2], THEME.gold[3], 1.0,
             "Rapid Vampyrism + Penance caster")
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            "Required sequence: 1 - 2 - 1 - 2")
+            "Required sequence: 1 - 2 - 3 - 4")
         ImGui.Separator()
 
         if not RUNTIME.running then
@@ -214,7 +214,7 @@ local function drawGui()
             ImGui.Text("Status: " .. RUNTIME.status)
             ImGui.Text("Runtime: " .. formatElapsed(elapsed))
             ImGui.Text("Last cast: " .. RUNTIME.lastCast)
-            ImGui.Text(string.format("Pairs: %d", RUNTIME.pairs))
+            ImGui.Text(string.format("Sequences: %d", RUNTIME.sequences))
             ImGui.Text(string.format("Vampyrism casts: %d", RUNTIME.vampyrismCasts))
             ImGui.Text(string.format("Penance casts: %d", RUNTIME.penanceCasts))
             ImGui.Text("Magic XP gained: " .. formatInteger(currentMagicXp() - RUNTIME.startXp))
